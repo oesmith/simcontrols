@@ -8,6 +8,8 @@
 #include "tusb.h"
 
 #define NUM_PEDALS 3
+#define SAMPLES_PER_REPORT 10
+#define INTERVAL_MILLIS 1
 
 void hid_task(void);
 void pedals_init(void);
@@ -19,10 +21,16 @@ int main(void)
   adc_init();
   pedals_init();
 
+  uint32_t start_ms = board_millis();
+
   while (1)
   {
     tud_task();
-    hid_task();
+
+    if (board_millis() - start_ms >= INTERVAL_MILLIS) {
+      start_ms += INTERVAL_MILLIS;
+      hid_task();
+    }
   }
 }
 
@@ -58,40 +66,33 @@ int8_t read_pedal(uint8_t pedal) {
   return (int8_t) map(pos, low, high, 127, -127);
 }
 
-//--------------------------------------------------------------------+
-// USB HID
-//--------------------------------------------------------------------+
-
-static void send_hid_report()
-{
-  // skip if hid is not ready yet
-  if ( !tud_hid_ready() ) return;
-
-  int8_t pedals[NUM_PEDALS];
-  for (int i = 0; i < NUM_PEDALS; i++) {
-    pedals[i] = read_pedal(i);
-  }
-
-  tud_hid_report(1, pedals, sizeof(pedals));
-}
-
-// Every 10ms, we will sent 1 report for each HID profile (keyboard, mouse etc ..)
-// tud_hid_report_complete_cb() is used to send the next report after previous one is complete
 void hid_task(void)
 {
-  // Poll every 10ms
-  const uint32_t interval_ms = 10;
-  static uint32_t start_ms = 0;
+  static int8_t sample_count = 0;
+  static int8_t samples[NUM_PEDALS][SAMPLES_PER_REPORT] = {0};
 
-  if ( board_millis() - start_ms < interval_ms) return; // not enough time
-  start_ms += interval_ms;
+  for (int i = 0; i < NUM_PEDALS; i++) {
+    samples[i][sample_count] = read_pedal(i);
+  }
+  sample_count += 1;
 
-  send_hid_report();
+  if (sample_count < SAMPLES_PER_REPORT) return;
+  sample_count = 0;
+
+  int8_t report[NUM_PEDALS];
+  for (int i = 0; i < NUM_PEDALS; i++) {
+    int16_t avg = 0;
+    for (int j = 0; j < SAMPLES_PER_REPORT; j++) {
+      avg += samples[i][j];
+    }
+    report[i] = avg / SAMPLES_PER_REPORT;
+  }
+
+  if (tud_hid_ready()) {
+    tud_hid_report(1, report, sizeof(report));
+  }
 }
 
-// Invoked when sent REPORT successfully to host
-// Application can use this to send the next report
-// Note: For composite reports, report[0] is report ID
 void tud_hid_report_complete_cb(uint8_t instance, uint8_t const* report, uint16_t len)
 {
   (void) instance;
@@ -99,12 +100,8 @@ void tud_hid_report_complete_cb(uint8_t instance, uint8_t const* report, uint16_
   (void) len;
 }
 
-// Invoked when received GET_REPORT control request
-// Application must fill buffer report's content and return its length.
-// Return zero will cause the stack to STALL request
 uint16_t tud_hid_get_report_cb(uint8_t instance, uint8_t report_id, hid_report_type_t report_type, uint8_t* buffer, uint16_t reqlen)
 {
-  // TODO not Implemented
   (void) instance;
   (void) report_id;
   (void) report_type;
@@ -114,8 +111,6 @@ uint16_t tud_hid_get_report_cb(uint8_t instance, uint8_t report_id, hid_report_t
   return 0;
 }
 
-// Invoked when received SET_REPORT control request or
-// received data on OUT endpoint ( Report ID = 0, Type = 0 )
 void tud_hid_set_report_cb(uint8_t instance, uint8_t report_id, hid_report_type_t report_type, uint8_t const* buffer, uint16_t bufsize)
 {
   (void) instance;
